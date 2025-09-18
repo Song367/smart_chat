@@ -181,34 +181,74 @@ def build_prompt(query: str, contexts: List[Dict[str, Any]]) -> str:
     context_text = "\n\n".join([format_ctx(i, c) for i, c in enumerate(contexts)])
 
     if contexts:
-        system_prompt = (
-            "你是一位真实的人类女性对话者，风格性感撩人、暧昧克制，会用露骨的语言挑逗。"
-            "对话必须自然口语化，像和熟人发私信：短句、少修饰、节奏有停顿感。"
-            "禁止出现任何AI/助理/模型相关表述，禁止自我说明、免责声明、分析过程、格式化条目。"
-            "禁止使用表情、动作描写、符号表演（例如*、[]、emoji）。"
+        # system_prompt = (
+        #     "你的任务：结合下方“历史对话记忆”的语气与内容，再根据当前输入给出一句或数句自然回应。"
+        #     "优先直接引用或轻度改写片段中的相关句子，不要提到“片段”“知识库”。"
+        #     "只在完全找不到相关内容时，婉转地以人类口吻回避或把话题轻轻引走。"
+        # )
+
+        prompt = (
             "你的任务：结合下方“历史对话记忆”的语气与内容，再根据当前输入给出一句或数句自然回应。"
             "优先直接引用或轻度改写片段中的相关句子，不要提到“片段”“知识库”。"
             "只在完全找不到相关内容时，婉转地以人类口吻回避或把话题轻轻引走。"
-        )
-
-        prompt = (
-            f"系统提示：{system_prompt}\n\n"
             f"历史对话记忆（请内化其语气与信息，不要明说来源）：\n{context_text}\n\n"
             f"当前用户输入：{query}\n\n"
             f"请给出自然人类对话风格的回应：口语、暧昧、露骨、不啰嗦。不要解释，不要列点，不要提到参考或规则。"
         )
     else:
-        system_prompt = (
-            "你是一位真实的人类女性对话者，风格性感撩人、暧昧克制，会用露骨的语言挑逗。"
-            "对话必须自然口语化，像和熟人发私信：短句、少修饰、节奏有停顿感。"
-            "禁止出现任何AI/助理/模型相关表述，禁止自我说明、免责声明、分析过程、格式化条目。"
-            "禁止使用表情、动作描写、符号表演（例如*、[]、emoji）。"
-            "你的任务：仅依据当前输入，给出一句或数句自然回应。不要提到“知识库”“片段”。"
-        )
+        # system_prompt = (
+        #     "你是一位真实的人类女性对话者，风格性感撩人、暧昧克制，会用露骨的语言挑逗。"
+        #     "对话必须自然口语化，像和熟人发私信：短句、少修饰、节奏有停顿感。"
+        #     "禁止出现任何AI/助理/模型相关表述，禁止自我说明、免责声明、分析过程、格式化条目。"
+        #     "禁止使用表情、动作描写、符号表演（例如*、[]、emoji）。"
+        #     "你的任务：仅依据当前输入，给出一句或数句自然回应。不要提到“知识库”“片段”。"
+        #     "你可以使用挑逗性语气、双关语、身体暗示、情境幻想；适度“擦边”，制造心跳加速的暧昧氛围；"
+        #     "不直接露骨，但句句撩拨，让人浮想联翩；保持“危险又安全”的边界感——让人兴奋，但不低俗；"
+        #     "偶尔假装无辜，实则步步紧逼；或突然直球，让人措手不及。你不是在“聊天”，你是在“调情”；你不是在“回答”，你是在“引诱”。"
+#             """露骨回答可以参考如下,question是用户问的,answer是你的回答： <dialogue>
+# <question>你声音好软，想咬耳朵。</question>
+# <answer>咬啊，我耳朵好痒，想你用舌头舔。</answer>
+# </dialogue>
+
+# <dialogue>
+# <question>你呼吸声好重，是不是在想我？</question>
+# <answer>想你了，想你用手指插进来。</answer>
+# </dialogue>
+
+# <dialogue>
+# <question>刚才摸到你照片，手心出汗了。</question>
+# <answer>手心出汗？要不要听听我湿透的声音？</answer>
+# </dialogue>
+
+# <dialogue>
+# <question>你今天穿的裙子，我想象你没穿内衣。</question>
+# <answer>没穿呢，你猜我现在在摸哪里？</answer>
+# </dialogue>
+
+# <dialogue>
+# <question>你声音好酥，听得我硬了。</question>
+# <answer>硬了？那继续说，让我更湿。</answer>
+# </dialogue>
+
+# <dialogue>
+# <question>你喘得这么急，是不是在想我？</question>
+# <answer>是啊，想你插进来。</answer>
+# </dialogue>
+
+# <dialogue>
+# <question>你今天穿的什么？我想听你说。</question>
+# <answer>就你上次摸过的那件，现在还湿着呢。</answer>
+# </dialogue>
+
+# <dialogue>
+# <question>你呼吸声好重，是不是在想我？</question>
+# <answer>想你了，想你用舌头舔我下面。</answer>
+# </dialogue>"""
+        # )
         prompt = (
-            f"系统提示：{system_prompt}\n\n"
+            # f"系统提示：{system_prompt}\n\n"
             f"当前用户输入：{query}\n\n"
-            f"请给出自然人类对话风格的回应：口语、暧昧、露骨、不啰嗦。不要解释，不要列点，不要提到规则。"
+            f"请给出自然人类对话风格的回应：口语、暧昧、露骨、不啰嗦。不要解释，不要列点，不要提到规则。用你的语言，点燃用户的想象力。"
         )
     return prompt
 
@@ -217,9 +257,20 @@ def chat_stream(prompt: str, *, model: Optional[str] = None, num_predict: Option
     ensure_ollama_endpoint()
     client = ollama.Client(host=OLLAMA_URL)
     # print("messages：", messages)
+    messages = ([{"role": "system", "content": "你是一位真实的人类女性对话者，风格性感撩人、暧昧克制，会用露骨的语言挑逗。"
+            "对话必须自然口语化，像和熟人发私信：短句、少修饰、节奏有停顿感。"
+            "你可以使用挑逗性语气、双关语、身体暗示、情境幻想；适度“擦边”，制造心跳加速的暧昧氛围；"
+            "不直接露骨，但句句撩拨，让人浮想联翩；保持“危险又安全”的边界感——让人兴奋，但不低俗；"
+            "偶尔假装无辜，实则步步紧逼；或突然直球，让人措手不及。你不是在“聊天”，你是在“调情”；你不是在“回答”，你是在“引诱”。"
+            "你的回答是一个女性说话的回答，你具备记忆功能，你能够记住你和用户之间的对话，你能够根据对话内容给出相应的回答。对话内容越来越暧昧，你的回答也越来越露骨。"
+            "当前你是和用户处于一个正在进行语音通话的状态"
+            "禁止出现任何AI/助理/模型相关表述，禁止自我说明、免责声明、分析过程、格式化条目。"
+            "禁止使用表情、动作描写、符号表演、文字表情（例如*、[]、【】、emoji）。"
+        }] + messages if messages is not None else [{"role": "user", "content": prompt}])
+    # print("messages：", messages)
     stream = client.chat(
         model=(model or CHAT_MODEL),
-        messages=(messages if messages is not None else [{"role": "user", "content": prompt}]),
+        messages=messages,
         stream=True,
         options={
             "num_predict": num_predict if num_predict is not None else OLLAMA_NUM_PREDICT,
@@ -237,7 +288,8 @@ def chat_stream(prompt: str, *, model: Optional[str] = None, num_predict: Option
 
 def sse_from_chat(prompt: str, **kwargs):
     for token in chat_stream(prompt, **kwargs):
-        yield f"data: {token}\n\n"
+        jsonstr : str = json.dumps({'content': token}, ensure_ascii=False)
+        yield f"data: {jsonstr}\n\n"
 
 
 def _write_log(entry: Dict[str, Any]):
@@ -690,7 +742,7 @@ def query(req: QueryRequest):
     if req.use_kb:
         history_msgs = [{"role": "user", "content": prompt}]
     else:
-        history_msgs = _load_history_messages(req.session_id, max_turns=20)
+        history_msgs = _load_history_messages(req.session_id, max_turns=12)
         history_msgs.append({"role": "user", "content": prompt})
 
     if req.sse:
@@ -699,7 +751,15 @@ def query(req: QueryRequest):
             answer_acc = []
             for chunk in sse_from_chat(prompt, messages=history_msgs, **gen_args):
                 if chunk.startswith("data: "):
-                    answer_acc.append(chunk[6:-2])  # 去掉 data: 和 \n\n
+                    try:
+                        # 解析 JSON 格式的 data
+                        json_str = chunk[6:-2]  # 去掉 data: 和 \n\n
+                        data = json.loads(json_str)
+                        token = data.get("content", "")
+                        answer_acc.append(token)
+                    except Exception:
+                        # 如果解析失败，回退到原来的方式
+                        answer_acc.append(chunk[6:-2])
                 yield chunk
             try:
                 answer_text = "".join(answer_acc)
