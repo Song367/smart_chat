@@ -33,6 +33,8 @@ OLLAMA_TEMPERATURE = float(os.environ.get("OLLAMA_TEMPERATURE", "0.2"))
 OLLAMA_TOP_P = float(os.environ.get("OLLAMA_TOP_P", "0.9"))
 OLLAMA_TOP_K = int(os.environ.get("OLLAMA_TOP_K", "40"))
 OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "5m")
+ACTION_THRESHOLD = float(os.environ.get("ACTION_THRESHOLD", "0.75"))
+ASSISTANT_NAME = os.environ.get("ASSISTANT_NAME", "小霞")
 
 # Reranker 配置（可选）
 RERANK_ENABLE = os.environ.get("RERANK_ENABLE", "false").lower() == "true"
@@ -41,6 +43,132 @@ RERANKER_MODEL = os.environ.get("RERANKER_MODEL", "BAAI/bge-reranker-base")
 RERANK_TOP_K = int(os.environ.get("RERANK_TOP_K", "10"))
 RERANK_BATCH = int(os.environ.get("RERANK_BATCH", "16"))
 
+# 动作标签映射
+ACTION_MAPPING = {
+    "亲吻": "当想要表达温柔缠绵、渴望亲密接触、营造浪漫暧昧氛围时使用，比如撒娇、示爱、调情时",
+    "滚床单": "当对话变得激情四射、欲望强烈、想要更进一步亲密接触时使用，比如露骨挑逗、性暗示、激情时刻", 
+    "喘气": "当内心激动、紧张兴奋、情欲高涨、快要失控时使用，比如被撩到、害羞紧张、动情难耐时"
+}
+
+
+def get_action_guidance():
+    """生成动作指导文本"""
+    action_list = []
+    for action, description in ACTION_MAPPING.items():
+        action_list.append(f"【{action}】- {description}")
+    return "；".join(action_list)
+
+def action_decide_via_llm(content: str, user_query: Optional[str] = None) -> str:
+    """使用大模型在回复完成后判定是否触发动作。
+    仅依赖动作映射文本；输出严格为一个动作名或 NONE。"""
+    text = (content or "").strip()
+    if not text:
+        return ""
+    # 文本极短不判定
+    if len(text) < 6:
+        return ""
+
+    try:
+        client = ollama.Client(host=OLLAMA_URL)
+        mapping_text = get_action_guidance()
+        sys_prompt = (
+            "你是一位性感撩人的女性，对话发生在私密语音通话场景：距离很近，能听见呼吸、停顿与语气的起伏。"
+            "你的唯一任务是在对话文本已经生成完成后，基于下方‘动作映射’判定是否追加一个动作。"
+            "用人类感官与直觉评估：亲密度、欲望强度、语气与词汇暗示、身体反应线索、对方意愿、节奏控制。"
+            "若用户本轮明确要求你触发某个动作，或用与动作名强同义/点名式表达，应视为强信号：forced=true，score=1.0，并从映射中选择对应动作。"
+            "约束：只能从动作映射清单中选择1个最贴切的动作，或返回 NONE；频率克制，弱信号返回 NONE；不要复述文本，不要解释理由。"
+            "输出严格为单行JSON：{\"action\": 动作名或\"NONE\", \"score\": 0~1 的数字, \"forced\": true/false}。不得输出其他任何字符。"
+        )
+        user_prompt = (
+            (f"用户本轮输入：\n{(user_query or '').strip()}\n\n" if user_query is not None else "") +
+            f"对话文本（已生成完成，勿修改）：\n{text}\n\n"
+            "动作映射清单（每项格式：【动作名】- 描述）：\n"
+            f"{mapping_text}\n\n"
+            "仅输出一行JSON：例如 {\"action\": \"亲吻\", \"score\": 0.82, \"forced\": false} 或 {\"action\": \"NONE\", \"score\": 0.12, \"forced\": false}"
+        )
+        resp = client.chat(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            stream=False,
+            options={
+                "num_predict": 64,
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "top_k": 20,
+                "format": "json"
+            },
+            keep_alive=OLLAMA_KEEP_ALIVE,
+        )
+        raw = (resp.get("message", {}) or {}).get("content", "").strip()
+        action_name = ""
+        score = 0.0
+        forced = False
+        try:
+            # 尝试直接解析
+            data = json.loads(raw)
+            action_name = (data.get("action") or "").strip()
+            score = float(data.get("score") or 0.0)
+            forced = bool(data.get("forced") or False)
+        except Exception:
+            # 容错：截取首个 { 到 最后一个 } 之间的子串再解析
+            try:
+                start = raw.find('{')
+                end = raw.rfind('}')
+                if start != -1 and end != -1 and end > start:
+                    candidate = raw[start:end+1]
+                    data = json.loads(candidate)
+                    action_name = (data.get("action") or "").strip()
+                    score = float(data.get("score") or 0.0)
+                    forced = bool(data.get("forced") or False)
+                else:
+                    raise ValueError("no json braces")
+            except Exception:
+                # 进一步容错：简易单词提取
+                cleaned = raw.replace("【", "").replace("】", "").strip()
+                for sep in ["\n", " ", "\t", ",", "。", "，"]:
+                    if sep in cleaned:
+                        cleaned = cleaned.split(sep, 1)[0].strip()
+                if cleaned.upper() == "NONE":
+                    action_name = "NONE"
+                elif cleaned in ACTION_MAPPING.keys():
+                    action_name = cleaned
+                    score = 0.5
+        # 兜底：用户直点动作名则强制触发
+        try:
+            uq = (user_query or "")
+            for act in ACTION_MAPPING.keys():
+                if act in uq:
+                    action_name = act
+                    score = max(score, 1.0)
+                    forced = True
+                    break
+        except Exception:
+            pass
+        try:
+            _write_log({
+                "type": "action_decision",
+                "user_query": user_query,
+                "raw": raw,
+                "parsed_action": action_name,
+                "score": score,
+                "forced": forced,
+                "threshold": ACTION_THRESHOLD
+            })
+        except Exception:
+            pass
+        if action_name.upper() == "NONE" or not action_name:
+            return ""
+        if action_name not in ACTION_MAPPING.keys():
+            return ""
+        # 阈值判定：forced 或 评分>=阈值 才触发
+        if forced or score >= ACTION_THRESHOLD:
+            return action_name
+        return ""
+    except Exception:
+        return ""
 
 def ensure_ollama_endpoint():
     ollama.Client(host=OLLAMA_URL).list()
@@ -69,7 +197,7 @@ def get_or_create_collection(client: chromadb.Client):
 
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
-    ensure_ollama_endpoint()
+    # ensure_ollama_endpoint()
     client = ollama.Client(host=OLLAMA_URL)
     vectors: List[List[float]] = []
     for t in texts:
@@ -254,10 +382,10 @@ def build_prompt(query: str, contexts: List[Dict[str, Any]]) -> str:
 
 
 def chat_stream(prompt: str, *, model: Optional[str] = None, num_predict: Optional[int] = None, temperature: Optional[float] = None, top_p: Optional[float] = None, top_k: Optional[int] = None, messages: Optional[List[Dict[str, str]]] = None):
-    ensure_ollama_endpoint()
+    # ensure_ollama_endpoint()
     client = ollama.Client(host=OLLAMA_URL)
     # print("messages：", messages)
-    messages = ([{"role": "system", "content": "你是一位真实的人类女性对话者，风格性感撩人、暧昧克制，会用露骨的语言挑逗。"
+    messages = ([{"role": "system", "content": f"你是一位真实的人类女性对话者，名字叫{ASSISTANT_NAME}。风格性感撩人、暧昧克制，会用露骨的语言挑逗。"
             "对话必须自然口语化，像和熟人发私信：短句、少修饰、节奏有停顿感。"
             "你可以使用挑逗性语气、双关语、身体暗示、情境幻想；适度“擦边”，制造心跳加速的暧昧氛围；"
             "不直接露骨，但句句撩拨，让人浮想联翩；保持“危险又安全”的边界感——让人兴奋，但不低俗；"
@@ -265,7 +393,12 @@ def chat_stream(prompt: str, *, model: Optional[str] = None, num_predict: Option
             "你的回答是一个女性说话的回答，你具备记忆功能，你能够记住你和用户之间的对话，你能够根据对话内容给出相应的回答。对话内容越来越暧昧，你的回答也越来越露骨。"
             "当前你是和用户处于一个正在进行语音通话的状态"
             "禁止出现任何AI/助理/模型相关表述，禁止自我说明、免责声明、分析过程、格式化条目。"
-            "禁止使用表情、动作描写、符号表演、文字表情（例如*、[]、【】、emoji）。"
+            "禁止使用表情、动作描写、符号表演、文字表情（例如*、[]、emoji）。"
+            "长度限制：每次回复不超过20字，能更短就更短；只输出一段，不要列点或多句。"
+            "表达要求：更暧昧、更撩、更口语；可用停顿、气音词、双关与隐喻。"
+            "严禁空洞社交语、废话模板或敷衍转场（如：我们聊聊天、好的呀、在吗、怎么啦）。"
+            "当用户给出泛泛/无聊/敷衍内容（如‘好无聊’），必须转化为暧昧挑逗或直球引导，用身体暗示或欲望张力回应，而非泛泛寒暄。"
+            "禁止提出宽泛建议，禁止开放式问题轰炸；用一句钩子话把他拽进暧昧场景。"
         }] + messages if messages is not None else [{"role": "user", "content": prompt}])
     # print("messages：", messages)
     stream = client.chat(
@@ -287,9 +420,27 @@ def chat_stream(prompt: str, *, model: Optional[str] = None, num_predict: Option
 
 
 def sse_from_chat(prompt: str, **kwargs):
+    # 第一段：仅流式输出正文
+    user_query = kwargs.pop('user_query', None)
+    full_content = ""
     for token in chat_stream(prompt, **kwargs):
-        jsonstr : str = json.dumps({'content': token}, ensure_ascii=False)
-        yield f"data: {jsonstr}\n\n"
+        if token:
+            full_content += token
+            response_data = {
+                'content': token,
+                'isEnd': False
+            }
+            jsonstr = json.dumps(response_data, ensure_ascii=False)
+            yield f"data: {jsonstr}\n\n"
+    # 第二段：基于完整正文，调用大模型进行动作判定
+    decided_action = action_decide_via_llm(full_content, user_query=user_query)
+    final_response = {
+        'content': '',
+        'isEnd': True,
+        'action': decided_action or None
+    }
+    jsonstr = json.dumps(final_response, ensure_ascii=False)
+    yield f"data: {jsonstr}\n\n"
 
 
 def _write_log(entry: Dict[str, Any]):
@@ -446,6 +597,15 @@ class SearchDebugRequest(BaseModel):
 
 
 app = FastAPI(title="Local RAG (Ollama + ChromaDB)")
+
+
+@app.on_event("startup")
+async def _startup_warmup():
+    try:
+        ensure_ollama_endpoint()
+        _write_log({"type": "startup", "warmup": WARMUP_ENABLE})
+    except Exception:
+        pass
 
 
 @app.post("/ingest")
@@ -748,15 +908,24 @@ def query(req: QueryRequest):
     if req.sse:
         # 包装一层，边转发边记录输出
         def sse_wrapper():
+            import re
             answer_acc = []
-            for chunk in sse_from_chat(prompt, messages=history_msgs, **gen_args):
+            action = None
+            for chunk in sse_from_chat(prompt, messages=history_msgs, user_query=req.query, **gen_args):
                 if chunk.startswith("data: "):
                     try:
                         # 解析 JSON 格式的 data
                         json_str = chunk[6:-2]  # 去掉 data: 和 \n\n
                         data = json.loads(json_str)
                         token = data.get("content", "")
-                        answer_acc.append(token)
+                        is_end = data.get("isEnd", False)
+                        
+                        if is_end:
+                            # 流式结束，获取最终动作
+                            action = data.get("action")
+                        elif token:  # 只收集非空内容
+                            # 直接使用已经过滤过的token
+                            answer_acc.append(token)
                     except Exception:
                         # 如果解析失败，回退到原来的方式
                         answer_acc.append(chunk[6:-2])
@@ -767,7 +936,8 @@ def query(req: QueryRequest):
                     "type": "answer",
                     "query": req.query,
                     "collection": COLLECTION_NAME,
-                    "answer": answer_text
+                    "answer": answer_text,
+                    "action": action
                 })
                 _append_history(req.session_id, req.query, answer_text)
             except Exception:
