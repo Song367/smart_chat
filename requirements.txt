@@ -82,10 +82,12 @@ protobuf==6.32.1
 psutil==7.0.0
 pyasn1==0.6.1
 pyasn1_modules==0.4.2
+PyAudio==0.2.14
 pybase64==1.4.2
 pydantic==2.11.9
 pydantic-settings==2.10.1
 pydantic_core==2.33.2
+pydub==0.25.1
 Pygments==2.19.2
 pypdf==6.0.0
 PyPika==0.48.9
