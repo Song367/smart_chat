@@ -45,7 +45,7 @@ def _build_stream_body(req: OnlyTextRequest) -> str:
         "audio_setting": {
             "sample_rate": 32000,
             "bitrate": 128000,
-            "format": "mp3"
+            "format": "pcm"
         }
     }
     return json.dumps(body, ensure_ascii=False)
@@ -67,7 +67,7 @@ def _build_nonstream_body(req: OnlyTextRequest) -> str:
         "audio_setting": {
             "sample_rate": 32000,
             "bitrate": 128000,
-            "format": "mp3"
+            "format": "pcm"
         }
     }
     return json.dumps(body, ensure_ascii=False)

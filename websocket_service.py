@@ -19,6 +19,7 @@ class Session:
         self.websocket = websocket
         self.cancel_event = asyncio.Event()
         self.request_id: Optional[str] = None
+        self.pipeline_task: Optional[asyncio.Task] = None
 
     def new_request(self) -> str:
         self.request_id = uuid.uuid4().hex
@@ -27,13 +28,30 @@ class Session:
 
 
 async def _send_json(ws: WebSocket, data: Dict[str, Any]):
-    if ws.application_state == WebSocketState.CONNECTED:
-        await ws.send_text(json.dumps(data, ensure_ascii=False))
+    try:
+        if ws.client_state == WebSocketState.CONNECTED and ws.application_state == WebSocketState.CONNECTED:
+            await ws.send_text(json.dumps(data, ensure_ascii=False))
+    except Exception:
+        # 连接可能已关闭，静默失败，让上层根据 cancel_event 结束
+        try:
+            rid = data.get("request_id") if isinstance(data, dict) else None
+            print(f"[ws][send_json_failed] rid={rid} data_type={data.get('type') if isinstance(data, dict) else type(data)}")
+        except Exception:
+            pass
+        raise
 
 
 async def _send_binary(ws: WebSocket, data: bytes):
-    if ws.application_state == WebSocketState.CONNECTED:
-        await ws.send_bytes(data)
+    try:
+        if ws.client_state == WebSocketState.CONNECTED and ws.application_state == WebSocketState.CONNECTED:
+            await ws.send_bytes(data)
+    except Exception:
+        # 连接可能已关闭
+        try:
+            print(f"[ws][send_binary_failed] bytes={len(data)}")
+        except Exception:
+            pass
+        raise
 
 
 async def _generate_text_and_segment(session: Session, user_text: str, out_queue: asyncio.Queue):
@@ -177,16 +195,20 @@ async def _stream_tts(session: Session, text: str, *, meta: Optional[Dict[str, A
 
     seq = 0
     async for audio_bytes in _async_iter_bytes(loop, _iter_audio):
-        # 先发送一条 chunk 元信息，便于客户端对齐日志
+        # PCM 边收边播：直接下发二进制，同时可选发送一条极简元信息
+        await _send_binary(session.websocket, audio_bytes)
         await _send_json(session.websocket, {
             "type": "tts_chunk",
             "request_id": request_id,
             "index": (meta or {}).get("index"),
             "seq": seq,
             "size": len(audio_bytes),
+            "format": "pcm",
+            "sample_rate": 32000,
+            "channels": 1,
+            "width_bytes": 2
         })
         seq += 1
-        await _send_binary(session.websocket, audio_bytes)
     # 不在此处发送 tts_end，由上层消费者统一发送携带 index 的 tts_end
 
 
@@ -272,17 +294,39 @@ async def ws_handler(websocket: WebSocket):
                         await _send_json(websocket, {"type": "error", "request_id": request_id, "message": str(e)})
 
                 # 后台运行管道
-                asyncio.create_task(_pipeline())
+                session.pipeline_task = asyncio.create_task(_pipeline())
             elif mtype == "cancel":
                 session.cancel_event.set()
+                try:
+                    print(f"[ws][cancel] rid={session.request_id}")
+                except Exception:
+                    pass
                 await _send_json(websocket, {"type": "cancel_ack", "request_id": session.request_id})
             else:
                 await _send_json(websocket, {"type": "error", "message": f"unknown type: {mtype}"})
     except WebSocketDisconnect:
         # 连接断开即标记取消
         session.cancel_event.set()
+        try:
+            if session.pipeline_task and not session.pipeline_task.done():
+                session.pipeline_task.cancel()
+        except Exception:
+            pass
+        try:
+            print(f"[ws][disconnect] rid={session.request_id} reason=client_closed")
+        except Exception:
+            pass
     except Exception:
         session.cancel_event.set()
+        try:
+            if session.pipeline_task and not session.pipeline_task.done():
+                session.pipeline_task.cancel()
+        except Exception:
+            pass
+        try:
+            print(f"[ws][handler_exception] rid={session.request_id}")
+        except Exception:
+            pass
 
 
 @app.get("/health")
