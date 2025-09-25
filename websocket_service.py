@@ -20,6 +20,9 @@ class Session:
         self.cancel_event = asyncio.Event()
         self.request_id: Optional[str] = None
         self.pipeline_task: Optional[asyncio.Task] = None
+        self.session_id: str = uuid.uuid4().hex  # 每个连接分配唯一会话ID
+        self.history_messages: list = []  # 内存中存储该会话的历史对话
+        self._history_loaded = False  # 标记是否已加载历史
 
     def new_request(self) -> str:
         self.request_id = uuid.uuid4().hex
@@ -71,7 +74,21 @@ async def _generate_text_and_segment(session: Session, user_text: str, out_queue
     seg_index = 0
 
     def _iter_tokens():
-        for token in rag_ollama.chat_stream(user_text):
+        # 首次对话时加载历史到内存
+        if not session._history_loaded:
+            try:
+                session.history_messages = rag_ollama._load_history_messages(session.session_id, max_turns=12)
+                session._history_loaded = True
+                print(f"[ws][history_loaded] sid={session.session_id} count={len(session.history_messages)}")
+            except Exception as e:
+                print(f"[ws][history_load_failed] sid={session.session_id} error={e}")
+                session.history_messages = []
+        
+        # 使用内存中的历史对话
+        current_messages = session.history_messages.copy()
+        current_messages.append({"role": "user", "content": user_text})
+        
+        for token in rag_ollama.chat_stream("", messages=current_messages):
             if session.cancel_event.is_set():
                 break
             if token:
@@ -154,6 +171,17 @@ async def _generate_text_and_segment(session: Session, user_text: str, out_queue
             "type": "llm_end",
             "request_id": request_id,
         })
+        
+        # 追加到内存中的历史对话
+        try:
+            session.history_messages.append({"role": "user", "content": user_text})
+            session.history_messages.append({"role": "assistant", "content": final_text})
+            # 限制历史长度，保留最近12轮对话
+            if len(session.history_messages) > 24:  # 12轮 * 2条/轮
+                session.history_messages = session.history_messages[-24:]
+            print(f"[ws][history_updated] rid={request_id} sid={session.session_id} count={len(session.history_messages)}")
+        except Exception as e:
+            print(f"[ws][history_update_failed] rid={request_id} error={e}")
         try:
             print(f"[ws][llm_end] rid={request_id} total_len={len(final_text)}")
         except Exception:
@@ -312,6 +340,13 @@ async def ws_handler(websocket: WebSocket):
                 session.pipeline_task.cancel()
         except Exception:
             pass
+        # 连接断开时保存历史到文件（可选）
+        try:
+            if session.history_messages:
+                # 这里可以添加保存到文件的逻辑，或者依赖定期保存
+                pass
+        except Exception:
+            pass
         try:
             print(f"[ws][disconnect] rid={session.request_id} reason=client_closed")
         except Exception:
@@ -337,10 +372,14 @@ def health():
 @app.on_event("startup")
 async def _startup_ollama_warmup():
     try:
-        # 预热 Ollama，确保模型端点可用，减少首个请求延迟
-        rag_ollama.ensure_ollama_endpoint()
-    except Exception:
+        if rag_ollama.USE_OPENAI_CLIENT:
+            print("WebSocket 服务：使用 OpenAI 客户端，跳过 Ollama 初始化")
+        else:
+            # 预热 Ollama，确保模型端点可用，减少首个请求延迟
+            rag_ollama.ensure_ollama_endpoint()
+            print("WebSocket 服务：Ollama 端点已就绪")
+    except Exception as e:
+        print(f"WebSocket 服务初始化失败: {e}")
         # 忽略预热失败，后续请求仍会按需尝试
-        pass
 
 

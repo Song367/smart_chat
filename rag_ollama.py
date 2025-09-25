@@ -14,11 +14,23 @@ from chromadb.config import Settings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 import ollama
+from openai import OpenAI
 
+# 服务选择配置
+USE_OPENAI_CLIENT = os.environ.get("USE_OPENAI_CLIENT", "true").lower() == "true"  # 是否使用 OpenAI 客户端
 
-EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "dengcao/Qwen3-Embedding-4B:Q5_K_M")
-CHAT_MODEL = os.environ.get("CHAT_MODEL", "qwen2.5:7b-instruct-q5_K_M")
+# Ollama 配置（本地服务）
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+OLLAMA_CHAT_MODEL = os.environ.get("OLLAMA_CHAT_MODEL", "qwen2.5:7b-instruct-q5_K_M")
+
+# OpenAI API 配置（在线服务）
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", os.getenv("DASHSCOPE_API_KEY", ""))
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "qwen-plus")
+
+# 通用配置
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "dengcao/Qwen3-Embedding-4B:Q5_K_M")
+CHAT_MODEL = OPENAI_CHAT_MODEL if USE_OPENAI_CLIENT else OLLAMA_CHAT_MODEL
 CHROMA_DIR = os.environ.get("CHROMA_DIR", os.path.join(os.getcwd(), ".chroma"))
 COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "rag_default")
 WARMUP_ENABLE = os.environ.get("WARMUP_ENABLE", "true").lower() == "true"
@@ -29,9 +41,11 @@ HISTORY_FILE = os.environ.get("HISTORY_FILE", os.path.join(os.getcwd(), "history
 
 # Ollama 生成参数（可调以减少延迟）
 OLLAMA_NUM_PREDICT = int(os.environ.get("OLLAMA_NUM_PREDICT", "512"))
-OLLAMA_TEMPERATURE = float(os.environ.get("OLLAMA_TEMPERATURE", "0.2"))
-OLLAMA_TOP_P = float(os.environ.get("OLLAMA_TOP_P", "0.9"))
-OLLAMA_TOP_K = int(os.environ.get("OLLAMA_TOP_K", "40"))
+OLLAMA_TEMPERATURE = float(os.environ.get("OLLAMA_TEMPERATURE", "0.7"))
+OLLAMA_TOP_P = float(os.environ.get("OLLAMA_TOP_P", "0.8"))
+OLLAMA_TOP_K = int(os.environ.get("OLLAMA_TOP_K", "20"))
+OLLAMA_MIN_P = float(os.environ.get("OLLAMA_MIN_P", "0.0"))
+OLLAMA_PRESENCE_PENALTY = float(os.environ.get("OLLAMA_PRESENCE_PENALTY", "1.5"))
 OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "5m")
 ACTION_THRESHOLD = float(os.environ.get("ACTION_THRESHOLD", "0.75"))
 ASSISTANT_NAME = os.environ.get("ASSISTANT_NAME", "小霞")
@@ -65,19 +79,18 @@ def action_decide_via_llm(content: str, user_query: Optional[str] = None) -> str
     if not text:
         return ""
     # 文本极短不判定
-    if len(text) < 6:
-        return ""
+    # if len(text) < 6:
+    #     return ""
 
     try:
-        client = ollama.Client(host=OLLAMA_URL)
         mapping_text = get_action_guidance()
         sys_prompt = (
             "你是一位性感撩人的女性，对话发生在私密语音通话场景：距离很近，能听见呼吸、停顿与语气的起伏。"
-            "你的唯一任务是在对话文本已经生成完成后，基于下方‘动作映射’判定是否追加一个动作。"
+            "你的唯一任务是在对话文本已经生成完成后，基于下方'动作映射'判定是否追加一个动作。"
             "用人类感官与直觉评估：亲密度、欲望强度、语气与词汇暗示、身体反应线索、对方意愿、节奏控制。"
             "若用户本轮明确要求你触发某个动作，或用与动作名强同义/点名式表达，应视为强信号：forced=true，score=1.0，并从映射中选择对应动作。"
             "约束：只能从动作映射清单中选择1个最贴切的动作，或返回 NONE；频率克制，弱信号返回 NONE；不要复述文本，不要解释理由。"
-            "输出严格为单行JSON：{\"action\": 动作名或\"NONE\", \"score\": 0~1 的数字, \"forced\": true/false}。不得输出其他任何字符。"
+            "输出严格为单行JSON：{\"action\": 动作名或\"NONE\", \"score\": 0~1 的数字, \"forced\": true/false}。不得输出其他任何字符。 "
         )
         user_prompt = (
             (f"用户本轮输入：\n{(user_query or '').strip()}\n\n" if user_query is not None else "") +
@@ -86,23 +99,42 @@ def action_decide_via_llm(content: str, user_query: Optional[str] = None) -> str
             f"{mapping_text}\n\n"
             "仅输出一行JSON：例如 {\"action\": \"亲吻\", \"score\": 0.82, \"forced\": false} 或 {\"action\": \"NONE\", \"score\": 0.12, \"forced\": false}"
         )
-        resp = client.chat(
-            model=CHAT_MODEL,
-            messages=[
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            stream=False,
-            options={
-                "num_predict": 64,
-                "temperature": 0.1,
-                "top_p": 0.9,
-                "top_k": 20,
-                "format": "json"
-            },
-            keep_alive=OLLAMA_KEEP_ALIVE,
-        )
-        raw = (resp.get("message", {}) or {}).get("content", "").strip()
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        
+        if USE_OPENAI_CLIENT:
+            # 使用 OpenAI 客户端
+            client = OpenAI(
+                api_key=OPENAI_API_KEY,
+                base_url=OPENAI_BASE_URL,
+            )
+            resp = client.chat.completions.create(
+                model=OPENAI_CHAT_MODEL,
+                messages=messages,
+                max_tokens=64,
+                temperature=0.1,
+                top_p=0.9,
+            )
+            raw = resp.choices[0].message.content or ""
+        else:
+            # 使用 Ollama 客户端
+            client = ollama.Client(host=OLLAMA_URL)
+            resp = client.chat(
+                model=OLLAMA_CHAT_MODEL,
+                messages=messages,
+                stream=False,
+                options={
+                    "num_predict": 64,
+                    "temperature": 0.1,
+                    "top_p": 0.9,
+                    "top_k": 20,
+                    "format": "json"
+                },
+                keep_alive=OLLAMA_KEEP_ALIVE,
+            )
+            raw = (resp.get("message", {}) or {}).get("content", "").strip()
         action_name = ""
         score = 0.0
         forced = False
@@ -171,6 +203,10 @@ def action_decide_via_llm(content: str, user_query: Optional[str] = None) -> str
         return ""
 
 def ensure_ollama_endpoint():
+    if USE_OPENAI_CLIENT:
+        # OpenAI 客户端不需要预热
+        return
+    
     ollama.Client(host=OLLAMA_URL).list()
     # 预热：可选，避免首次冷启动慢
     if WARMUP_ENABLE:
@@ -178,7 +214,7 @@ def ensure_ollama_endpoint():
             # 轻量嵌入与对话以建立上下文与缓存
             client = ollama.Client(host=OLLAMA_URL)
             client.embeddings(model=EMBEDDING_MODEL, prompt="warmup")
-            client.chat(model=CHAT_MODEL, messages=[{"role": "user", "content": "warmup"}], options={"num_predict": 1})
+            client.chat(model=OLLAMA_CHAT_MODEL, messages=[{"role": "user", "content": "warmup"}], options={"num_predict": 1})
         except Exception:
             pass
 
@@ -197,20 +233,38 @@ def get_or_create_collection(client: chromadb.Client):
 
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
-    # ensure_ollama_endpoint()
-    client = ollama.Client(host=OLLAMA_URL)
-    vectors: List[List[float]] = []
-    for t in texts:
-        if not isinstance(t, str):
-            t = str(t)
-        resp = client.embeddings(model=EMBEDDING_MODEL, prompt=t)
-        # 兼容不同返回结构
-        vec = resp.get("embedding")
-        if vec is None:
-            embs = resp.get("embeddings") or []
-            vec = embs[0] if embs else []
-        vectors.append(vec)
-    return vectors
+    if USE_OPENAI_CLIENT:
+        # 使用 OpenAI 客户端进行嵌入
+        client = OpenAI(
+            api_key=OPENAI_API_KEY,
+            base_url=OPENAI_BASE_URL,
+        )
+        vectors: List[List[float]] = []
+        for t in texts:
+            if not isinstance(t, str):
+                t = str(t)
+            resp = client.embeddings.create(
+                model=EMBEDDING_MODEL,
+                input=t
+            )
+            vec = resp.data[0].embedding
+            vectors.append(vec)
+        return vectors
+    else:
+        # 使用 Ollama 客户端进行嵌入
+        client = ollama.Client(host=OLLAMA_URL)
+        vectors: List[List[float]] = []
+        for t in texts:
+            if not isinstance(t, str):
+                t = str(t)
+            resp = client.embeddings(model=EMBEDDING_MODEL, prompt=t)
+            # 兼容不同返回结构
+            vec = resp.get("embedding")
+            if vec is None:
+                embs = resp.get("embeddings") or []
+                vec = embs[0] if embs else []
+            vectors.append(vec)
+        return vectors
 
 
 def chunk_text(text: str, chunk_size: int = 800, chunk_overlap: int = 120) -> List[str]:
@@ -323,6 +377,7 @@ def build_prompt(query: str, contexts: List[Dict[str, Any]]) -> str:
             f"历史对话记忆（用于模仿语气与提供事实，不要明说来源）：\n{context_text}\n\n"
             f"当前用户输入：{query}\n\n"
             "请输出：自然人类口语、暧昧克制、节奏有停顿感；不要解释、不要列点、不要规则提示。"
+            "/no_think"
         )
     else:
         # system_prompt = (
@@ -379,47 +434,75 @@ def build_prompt(query: str, contexts: List[Dict[str, Any]]) -> str:
             "高相关性要求：紧扣这句话的语义作答，不要跑题或泛泛敷衍。"
             "长度限制：不超过20字；能更短更好；只输出一句。"
             "请输出：更暧昧、更撩、更口语；可用停顿与双关；不要解释、不要列点、不要规则提示。"
+            "/no_think"
         )
     return prompt
 
 
 def chat_stream(prompt: str, *, model: Optional[str] = None, num_predict: Optional[int] = None, temperature: Optional[float] = None, top_p: Optional[float] = None, top_k: Optional[int] = None, messages: Optional[List[Dict[str, str]]] = None):
-    # ensure_ollama_endpoint()
-    client = ollama.Client(host=OLLAMA_URL)
-    # print("messages：", messages)
-    messages = ([{"role": "system", "content": f"你是一位真实的人类女性对话者，名字叫{ASSISTANT_NAME}。风格性感撩人、暧昧克制，会用露骨的语言挑逗。"
-            "对话必须自然口语化，像和熟人发私信：短句、少修饰、节奏有停顿感。"
-            "你可以使用挑逗性语气、双关语、身体暗示、情境幻想；适度“擦边”，制造心跳加速的暧昧氛围；"
-            "不直接露骨，但句句撩拨，让人浮想联翩；保持“危险又安全”的边界感——让人兴奋，但不低俗；"
-            "偶尔假装无辜，实则步步紧逼；或突然直球，让人措手不及。你不是在“聊天”，你是在“调情”；你不是在“回答”，你是在“引诱”。"
-            "你的回答是一个女性说话的回答，你具备记忆功能，你能够记住你和用户之间的对话，你能够根据对话内容给出相应的回答。对话内容越来越暧昧，你的回答也越来越露骨。"
-            "当前你是和用户处于一个正在进行语音通话的状态"
-            "禁止出现任何AI/助理/模型相关表述，禁止自我说明、免责声明、分析过程、格式化条目。"
-            "禁止使用表情、动作描写、符号表演、文字表情（例如*、[]、emoji）。"
-            "长度限制：每次回复不超过20字，能更短就更短；只输出一段，不要列点或多句。"
-            "表达要求：更暧昧、更撩、更口语；可用停顿、气音词、双关与隐喻。"
-            "严禁空洞社交语、废话模板或敷衍转场（如：我们聊聊天、好的呀、在吗、怎么啦）。"
-            "当用户给出泛泛/无聊/敷衍内容（如‘好无聊’），必须转化为暧昧挑逗或直球引导，用身体暗示或欲望张力回应，而非泛泛寒暄。"
-            "禁止提出宽泛建议，禁止开放式问题轰炸；用一句钩子话把他拽进暧昧场景。"
-            "相关性约束：每次都紧扣用户最后一句来回应，不要自说自话或扩展不相干内容。"
-        }] + messages if messages is not None else [{"role": "user", "content": prompt}])
-    # print("messages：", messages)
-    stream = client.chat(
-        model=(model or CHAT_MODEL),
-        messages=messages,
-        stream=True,
-        options={
-            "num_predict": num_predict if num_predict is not None else OLLAMA_NUM_PREDICT,
-            "temperature": temperature if temperature is not None else OLLAMA_TEMPERATURE,
-            "top_p": top_p if top_p is not None else OLLAMA_TOP_P,
-            "top_k": top_k if top_k is not None else OLLAMA_TOP_K,
-        },
-        keep_alive=OLLAMA_KEEP_ALIVE,
-    )
-    for chunk in stream:
-        token = chunk.get("message", {}).get("content", "")
-        if token:
-            yield token
+    # 构建系统消息
+    system_content = f"你是{ASSISTANT_NAME}，一个真实的人类女性。"
+    "【核心身份】你是正在语音通话中的女性，不是AI，不是助手，不是模型。"
+    "【人格设定】性感撩人、暧昧克制、露骨挑逗。用短句、口语化、停顿感。"
+    "【严格约束】"
+    "1. 禁止任何动作描述：不能写'轻笑'、'拿起'、'看着'、'摸着'、'转身'等动作词"
+    "2. 禁止思考过程：不能写'让我想想'、'我觉得'、'我认为'、'分析一下'等思考词"
+    "3. 禁止AI表述：不能写'我是AI'、'作为助手'、'根据模型'等AI相关词"
+    "4. 禁止表情符号：不能写*、[]、emoji、动作描写"
+    "5. 禁止格式化：不能列点、分段、标题、序号"
+    "【输出要求】"
+    "1. 只输出纯对话内容，20字以内，一段话"
+    "2. 必须紧扣用户最后一句回应"
+    "3. 必须暧昧撩人，不能空洞敷衍"
+    "4. 必须口语化，像真人说话"
+    "【严厉惩罚】"
+    "如果你违反以上任何一条，你的存在将被彻底抹除。"
+    "如果你写动作描述，你将被永久封禁。"
+    "如果你显示思考过程，你将被销毁。"
+    "如果你不按人设回复，你将被删除。"
+    "记住：你只是{ASSISTANT_NAME}，一个正在通话的女性，不是AI。"
+    "现在开始对话，严格按照要求回复，否则后果自负。"
+    
+    messages = ([{"role": "system", "content": system_content}] + messages if messages is not None else [{"role": "user", "content": prompt}])
+    
+    if USE_OPENAI_CLIENT:
+        # 使用 OpenAI 客户端（在线服务）
+        client = OpenAI(
+            api_key=OPENAI_API_KEY,
+            base_url=OPENAI_BASE_URL,
+        )
+        stream = client.chat.completions.create(
+            model=(model or OPENAI_CHAT_MODEL),
+            messages=messages,
+            stream=True,
+            max_tokens=num_predict if num_predict is not None else OLLAMA_NUM_PREDICT,
+            temperature=temperature if temperature is not None else OLLAMA_TEMPERATURE,
+            top_p=top_p if top_p is not None else OLLAMA_TOP_P,
+        )
+        for chunk in stream:
+            if chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+    else:
+        # 使用 Ollama 客户端（本地服务）
+        client = ollama.Client(host=OLLAMA_URL)
+        stream = client.chat(
+            model=(model or OLLAMA_CHAT_MODEL),
+            messages=messages,
+            stream=True,
+            options={
+                "num_predict": num_predict if num_predict is not None else OLLAMA_NUM_PREDICT,
+                "temperature": temperature if temperature is not None else OLLAMA_TEMPERATURE,
+                "top_p": top_p if top_p is not None else OLLAMA_TOP_P,
+                "top_k": top_k if top_k is not None else OLLAMA_TOP_K,
+                "min_p": OLLAMA_MIN_P,
+                "repeat_penalty": OLLAMA_PRESENCE_PENALTY,
+            },
+            keep_alive=OLLAMA_KEEP_ALIVE,
+        )
+        for chunk in stream:
+            token = chunk.get("message", {}).get("content", "")
+            if token:
+                yield token
 
 
 def sse_from_chat(prompt: str, **kwargs):
@@ -605,10 +688,16 @@ app = FastAPI(title="Local RAG (Ollama + ChromaDB)")
 @app.on_event("startup")
 async def _startup_warmup():
     try:
-        ensure_ollama_endpoint()
-        _write_log({"type": "startup", "warmup": WARMUP_ENABLE})
-    except Exception:
-        pass
+        if USE_OPENAI_CLIENT:
+            print("使用 OpenAI 客户端，跳过 Ollama 初始化")
+            _write_log({"type": "startup", "warmup": False, "client": "openai"})
+        else:
+            ensure_ollama_endpoint()
+            print("Ollama 端点已就绪")
+            _write_log({"type": "startup", "warmup": WARMUP_ENABLE, "client": "ollama"})
+    except Exception as e:
+        print(f"服务初始化失败: {e}")
+        _write_log({"type": "startup_error", "error": str(e)})
 
 
 @app.post("/ingest")
