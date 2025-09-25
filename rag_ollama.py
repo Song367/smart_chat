@@ -49,6 +49,7 @@ OLLAMA_PRESENCE_PENALTY = float(os.environ.get("OLLAMA_PRESENCE_PENALTY", "1.5")
 OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "5m")
 ACTION_THRESHOLD = float(os.environ.get("ACTION_THRESHOLD", "0.75"))
 ASSISTANT_NAME = os.environ.get("ASSISTANT_NAME", "小霞")
+REPLY_CHAR_LIMIT = int(os.environ.get("REPLY_CHAR_LIMIT", "20"))
 
 # Reranker 配置（可选）
 RERANK_ENABLE = os.environ.get("RERANK_ENABLE", "false").lower() == "true"
@@ -57,20 +58,135 @@ RERANKER_MODEL = os.environ.get("RERANKER_MODEL", "BAAI/bge-reranker-base")
 RERANK_TOP_K = int(os.environ.get("RERANK_TOP_K", "10"))
 RERANK_BATCH = int(os.environ.get("RERANK_BATCH", "16"))
 
-# 动作标签映射
-ACTION_MAPPING = {
-    "亲吻": "当想要表达温柔缠绵、渴望亲密接触、营造浪漫暧昧氛围时使用，比如撒娇、示爱、调情时",
-    "滚床单": "当对话变得激情四射、欲望强烈、想要更进一步亲密接触时使用，比如露骨挑逗、性暗示、激情时刻", 
-    "喘气": "当内心激动、紧张兴奋、情欲高涨、快要失控时使用，比如被撩到、害羞紧张、动情难耐时"
+# 动作注册表（服务端唯一真源）：含判定描述 + 媒体落地参数（全部本地资源，带 path）
+# 约定：音频位于 assets/audio，图片位于 assets/images
+ACTION_REGISTRY = {
+    "亲吻": {
+        "description": "当想表达温柔缠绵、渴望亲密接触、营造浪漫暧昧氛围时触发；对方使用亲吻/嘴/唇/想吻等强信号时更倾向触发。",
+        "kind": "audio",
+        "delay": "after_tts",
+        "media": {"source": "local", "id": "kiss", "path": "assets/audio/kiss.WAV", "format": "wav"}
+    },
+    "撒娇": {
+        "description": "当需要软萌、亲昵、可爱地拉近距离时触发；如求关注、轻哄、半逗半真。",
+        "kind": "audio",
+        "delay": "after_tts",
+        "media": {"source": "local", "id": "action_cute", "path": "assets/audio/action_cute.WAV", "format": "wav"}
+    },
+    "故意拒绝": {
+        "description": "当以暧昧方式说‘不要/别这样’来吊胃口、挑逗边界但不生硬拒绝时触发；语气轻松带笑。",
+        "kind": "audio",
+        "delay": "after_tts",
+        "media": {"source": "local", "id": "refuse", "path": "assets/audio/refuse.WAV", "format": "wav"}
+    },
+    "叫宝贝": {
+        "description": "当需要以亲昵称呼‘宝贝/宝宝/小可爱’来加深亲密感时触发；语气温柔黏人。",
+        "kind": "audio",
+        "delay": "after_tts",
+        "media": {"source": "local", "id": "say_baby", "path": "assets/audio/say_baby.WAV", "format": "wav"}
+    },
+    "鼻子闻气味": {
+        "description": "当表达贴近、靠近对方闻气味、带点调皮暧昧的氛围时触发。",
+        "kind": "audio",
+        "delay": "after_tts",
+        "media": {"source": "local", "id": "smell", "path": "assets/audio/smell.WAV", "format": "wav"}
+    },
+    "吃醋-哼": {
+        "description": "当对方引发醋意、需要微嗔又撒娇的情绪表达时触发；语气傲娇短促。",
+        "kind": "audio",
+        "delay": "after_tts",
+        "media": {"source": "local", "id": "jealous_hum", "path": "assets/audio/吃醋-哼.WAV", "format": "wav"}
+    },
+    "自拍照": {
+        "description": "当对方想看你长什么样（面貌/正脸/露脸）时触发；直观的本人自拍。",
+        "kind": "image",
+        "delay": "after_tts",
+        "media": {"source": "local", "id": "life", "path": "assets/images/live.png"}
+    },
+    "写真照": {
+        "description": "当对方想要更精致、带点氛围感的写真图片时触发；更具表现力与质感。",
+        "kind": "image",
+        "delay": "after_tts",
+        "media": {"source": "local", "id": "portrait", "path": "assets/images/portial.jpg"}
+    }
 }
 
 
 def get_action_guidance():
-    """生成动作指导文本"""
+    """生成动作指导文本（供 LLM 判定使用），格式：每项一行【动作名】- 描述"""
     action_list = []
-    for action, description in ACTION_MAPPING.items():
-        action_list.append(f"【{action}】- {description}")
+    for action, cfg in ACTION_REGISTRY.items():
+        desc = (cfg.get("description") or "").strip()
+        if not desc:
+            continue
+        action_list.append(f"【{action}】- {desc}")
     return "；".join(action_list)
+
+
+
+def predict_action_via_llm_quick(user_text: str) -> Optional[str]:
+    """使用 LLM 做快速动作判定（低温、低 token），返回注册表内的动作名或 None。
+    不抛异常，失败即返回 None。"""
+    try:
+        guidance = get_action_guidance()
+        sys_prompt = (
+            f"你是{ASSISTANT_NAME}，一个正在语音通话中的人类女性（非AI、非助手）。\n"
+            "任务：结合‘用户当前这句话’与‘动作清单描述’，按照你的人格与亲密互动习惯，判断是否要自然触发一个动作来增强氛围。\n"
+            "原则：\n"
+            "- 只从清单里选择一个最贴切的动作；不合适就返回 NONE。\n"
+            "- 判定依据：对方是否明确请求/点名（如想看你长什么样→自拍照）；强同义表述/暗示；情绪强度（亲昵、挑逗、吃醋等）；场景契合度。\n"
+            "- 频率克制：没有把握时选择 NONE。\n"
+            "输出：只输出一行严格 JSON：{\"action\": 动作名或\"NONE\", \"score\": 0~1 数字, \"forced\": true/false}。\n"
+            "禁止：任何解释、思考过程、额外字符。"
+        )
+        user_msg = (
+            f"用户本轮输入：\n{(user_text or '').strip()}\n\n"
+            f"动作清单（每项格式【动作名】- 描述）：\n{guidance}"
+        )
+
+        if USE_OPENAI_CLIENT:
+            client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+            resp = client.chat.completions.create(
+                model=OPENAI_CHAT_MODEL,
+                messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_msg}],
+                temperature=0.1,
+                top_p=0.9,
+                max_tokens=48,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+        else:
+            client = ollama.Client(host=OLLAMA_URL)
+            resp = client.chat(
+                model=OLLAMA_CHAT_MODEL,
+                messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_msg}],
+                stream=False,
+                options={"num_predict": 64, "temperature": 0.1, "top_p": 0.9, "format": "json"},
+                keep_alive=OLLAMA_KEEP_ALIVE,
+            )
+            raw = (resp.get("message", {}) or {}).get("content", "").strip()
+
+        # 解析 JSON
+        try:
+            data = json.loads(raw)
+            act = (data.get("action") or "").strip()
+        except Exception:
+            # 容错提取
+            start = raw.find('{'); end = raw.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                try:
+                    data = json.loads(raw[start:end+1])
+                    act = (data.get("action") or "").strip()
+                except Exception:
+                    act = ""
+            else:
+                act = ""
+
+        if not act or act.upper() == "NONE":
+            return None
+        # 仅返回注册表中存在的动作
+        return act if act in ACTION_REGISTRY.keys() else None
+    except Exception:
+        return None
 
 def action_decide_via_llm(content: str, user_query: Optional[str] = None) -> str:
     """使用大模型在回复完成后判定是否触发动作。
@@ -165,13 +281,13 @@ def action_decide_via_llm(content: str, user_query: Optional[str] = None) -> str
                         cleaned = cleaned.split(sep, 1)[0].strip()
                 if cleaned.upper() == "NONE":
                     action_name = "NONE"
-                elif cleaned in ACTION_MAPPING.keys():
+                elif cleaned in ACTION_REGISTRY.keys():
                     action_name = cleaned
                     score = 0.5
         # 兜底：用户直点动作名则强制触发
         try:
             uq = (user_query or "")
-            for act in ACTION_MAPPING.keys():
+            for act in ACTION_REGISTRY.keys():
                 if act in uq:
                     action_name = act
                     score = max(score, 1.0)
@@ -193,7 +309,7 @@ def action_decide_via_llm(content: str, user_query: Optional[str] = None) -> str
             pass
         if action_name.upper() == "NONE" or not action_name:
             return ""
-        if action_name not in ACTION_MAPPING.keys():
+        if action_name not in ACTION_REGISTRY.keys():
             return ""
         # 阈值判定：forced 或 评分>=阈值 才触发
         if forced or score >= ACTION_THRESHOLD:
@@ -439,7 +555,7 @@ def build_prompt(query: str, contexts: List[Dict[str, Any]]) -> str:
     return prompt
 
 
-def chat_stream(prompt: str, *, model: Optional[str] = None, num_predict: Optional[int] = None, temperature: Optional[float] = None, top_p: Optional[float] = None, top_k: Optional[int] = None, messages: Optional[List[Dict[str, str]]] = None):
+def chat_stream(prompt: str, *, model: Optional[str] = None, num_predict: Optional[int] = None, temperature: Optional[float] = None, top_p: Optional[float] = None, top_k: Optional[int] = None, messages: Optional[List[Dict[str, str]]] = None, user_query: Optional[str] = None, planned_action: Optional[str] = None):
     # 构建系统消息
     system_content = f"你是{ASSISTANT_NAME}，一个真实的人类女性。"
     "【核心身份】你是正在语音通话中的女性，不是AI，不是助手，不是模型。"
@@ -463,8 +579,69 @@ def chat_stream(prompt: str, *, model: Optional[str] = None, num_predict: Option
     "记住：你只是{ASSISTANT_NAME}，一个正在通话的女性，不是AI。"
     "现在开始对话，严格按照要求回复，否则后果自负。"
     
-    messages = ([{"role": "system", "content": system_content}] + messages if messages is not None else [{"role": "user", "content": prompt}])
+    # 动作计划由上层（例如 WebSocket）进行判定；此处仅消费并注入提示
+
+    # 结构化系统提示：分“无动作/动作对齐”两套模板
+    if planned_action:
+        act_cfg = ACTION_REGISTRY.get(planned_action, {})
+        act_desc = (act_cfg.get("description") or "").strip()
+        system_with_action = (
+            system_content
+            + (
+                "【动作对齐版】\n"
+                f"- 你将自然地引导/承接此动作：{planned_action}。\n"
+                f"- 动作语境：{act_desc}\n"
+                f"- 台词时机：将该动作视为“刚刚已经完成”，你的回复是动作后的第一句话。\n"
+                f"- 台词目标：围绕动作结果做简短互动（评价/追问/暧昧反应），绝不叙述执行过程。\n"
+                "- 参考策略（按常见动作）：\n"
+                "  · 自拍照：像“好看吗？”“喜欢这种感觉吗？”而不是“我现在拍照”。\n"
+                "  · 亲吻：像“还要吗？”“味道够甜吗？”而不是“我现在亲你”。\n"
+                "  · 撒娇/叫宝贝：直接用称呼或黏人语气推进。\n"
+                "  · 鼻子闻气味：像“是不是好香？”“靠近点？”而不是“我在闻你”。\n"
+                "  · 吃醋-哼：像“现在只看我。”而不是解释吃醋的过程。\n"
+            )
+            + (
+                "【风格】\n"
+                f"- 口语、短句、停顿感；最多{REPLY_CHAR_LIMIT}字；只输出一段；紧扣对方最后一句。\n"
+                "- 暧昧但不空泛，可轻挑/邀请/期待，贴合该动作的语境。\n"
+            )
+            + (
+                "【禁止】\n"
+                "- 禁思考过程、规则/流程自述、列表、标题、表情符号、显式动作描写词（如“低头”“绕发梢”）。\n"
+                "- 禁任何AI/模型/助手表述，禁超过长度。\n"
+            )
+            + (
+                "【严惩】\n"
+                "一旦违规（含超字数、格式化、动作自述、AI表述、思考过程），当前回复作废。\n"
+            )
+        )
+    else:
+        system_with_action = (
+            system_content
+            + (
+                "【中性版】\n"
+                "- 本轮无动作计划：仅就对方最后一句做自然口语回应。\n"
+            )
+            + (
+                "【风格】\n"
+                f"- 口语、短句、停顿感；最多{REPLY_CHAR_LIMIT}字；只输出一段；紧扣对方最后一句。\n"
+                "- 暧昧、贴脸互动；不空泛。\n"
+            )
+            + (
+                "【禁止】\n"
+                "- 禁思考过程、规则/流程自述、列表、标题、表情符号、显式动作描写词。\n"
+                "- 禁任何AI/模型/助手表述，禁超过长度。\n"
+            )
+            + (
+                "【严惩】\n"
+                "一旦违规（含超字数、格式化、AI表述、思考过程），当前回复作废。\n"
+            )
+        )
+    messages = ([{"role": "system", "content": system_with_action}] + messages if messages is not None else [{"role": "user", "content": prompt}])
     
+    # 统一长度限制：服务端强制截断，确保不超过 REPLY_CHAR_LIMIT 字
+    emitted_chars = 0
+
     if USE_OPENAI_CLIENT:
         # 使用 OpenAI 客户端（在线服务）
         client = OpenAI(
@@ -481,7 +658,19 @@ def chat_stream(prompt: str, *, model: Optional[str] = None, num_predict: Option
         )
         for chunk in stream:
             if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+                text = chunk.choices[0].delta.content
+                if not text:
+                    continue
+                remain = REPLY_CHAR_LIMIT - emitted_chars
+                if remain <= 0:
+                    break
+                if len(text) > remain:
+                    text = text[:remain]
+                emitted_chars += len(text)
+                if text:
+                    yield text
+                if emitted_chars >= REPLY_CHAR_LIMIT:
+                    break
     else:
         # 使用 Ollama 客户端（本地服务）
         client = ollama.Client(host=OLLAMA_URL)
@@ -502,14 +691,24 @@ def chat_stream(prompt: str, *, model: Optional[str] = None, num_predict: Option
         for chunk in stream:
             token = chunk.get("message", {}).get("content", "")
             if token:
-                yield token
+                remain = REPLY_CHAR_LIMIT - emitted_chars
+                if remain <= 0:
+                    break
+                if len(token) > remain:
+                    token = token[:remain]
+                emitted_chars += len(token)
+                if token:
+                    yield token
+                if emitted_chars >= REPLY_CHAR_LIMIT:
+                    break
 
 
 def sse_from_chat(prompt: str, **kwargs):
     # 第一段：仅流式输出正文
     user_query = kwargs.pop('user_query', None)
+    planned_action = kwargs.pop('planned_action', None)
     full_content = ""
-    for token in chat_stream(prompt, **kwargs):
+    for token in chat_stream(prompt, user_query=user_query, planned_action=planned_action, **kwargs):
         if token:
             full_content += token
             response_data = {
@@ -518,12 +717,11 @@ def sse_from_chat(prompt: str, **kwargs):
             }
             jsonstr = json.dumps(response_data, ensure_ascii=False)
             yield f"data: {jsonstr}\n\n"
-    # 第二段：基于完整正文，调用大模型进行动作判定
-    decided_action = action_decide_via_llm(full_content, user_query=user_query)
+    # 第二段：结束标记（为降时延，仅返回上层传入的 planned_action）
     final_response = {
         'content': '',
         'isEnd': True,
-        'action': decided_action or None
+        'pre_action': planned_action or None
     }
     jsonstr = json.dumps(final_response, ensure_ascii=False)
     yield f"data: {jsonstr}\n\n"

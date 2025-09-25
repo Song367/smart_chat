@@ -8,7 +8,7 @@ import pyaudio  # pip install pyaudio
 
 
 WS_URL = "ws://127.0.0.1:9000/ws"
-TEST_TEXT = "工作日：9点–17点（16:30停止取号）"
+TEST_TEXT = "不猜了"
 
 
 class PcmPlayer:

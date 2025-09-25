@@ -37,7 +37,7 @@ def _build_stream_body(req: OnlyTextRequest) -> str:
         "stream": True,
         "language_boost": "auto",
         "voice_setting": {
-            "voice_id": "yantu-qinggang-demo2-male-4",
+            "voice_id": "wade-nx-001",
             "speed": 1,
             "vol": 1,
             "pitch": 0
@@ -59,7 +59,7 @@ def _build_nonstream_body(req: OnlyTextRequest) -> str:
         "language_boost": "auto",
         "output_format": "url",
         "voice_setting": {
-            "voice_id": "yantu-qinggang-demo2-male-4",
+            "voice_id": "wade-nx-001",
             "speed": 1,
             "vol": 1,
             "pitch": 0

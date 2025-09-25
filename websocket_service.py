@@ -2,16 +2,63 @@ import asyncio
 import json
 import re
 import uuid
+import os
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.websockets import WebSocketState
+from fastapi.staticfiles import StaticFiles
+import wave
+import io
 
 import rag_ollama
 import tts_service
 
 
 app = FastAPI(title="RAG + TTS WebSocket Service")
+# 挂载本地静态目录：/assets → ./assets （其中包含 audio/ 与 images/）
+app.mount("/assets", StaticFiles(directory="assets"), name="assets")
+
+
+def _resolve_media_path(path: str) -> Optional[str]:
+    """尽力解析本地媒体路径，兼容 assets/ 与工作目录直挂的 audio/images。
+    返回可用的绝对路径，找不到返回 None。
+    """
+    if not path:
+        return None
+    candidates = []
+    # 原始
+    candidates.append(path)
+    # 相对工作目录
+    candidates.append(os.path.join(os.getcwd(), path))
+    # 兼容 assets/audio → audio, assets/images → images
+    if path.startswith("assets/"):
+        candidates.append(path.replace("assets/audio", "audio").replace("assets\\audio", "audio"))
+        candidates.append(os.path.join(os.getcwd(), path.replace("assets/audio", "audio").replace("assets\\audio", "audio")))
+        candidates.append(path.replace("assets/images", "images").replace("assets\\images", "images"))
+        candidates.append(os.path.join(os.getcwd(), path.replace("assets/images", "images").replace("assets\\images", "images")))
+    # 大小写扩展（.wav/.WAV）
+    base, ext = os.path.splitext(path)
+    if ext.lower() == ".wav":
+        candidates.append(base + ".wav")
+        candidates.append(base + ".WAV")
+        candidates.append(os.path.join(os.getcwd(), base + ".wav"))
+        candidates.append(os.path.join(os.getcwd(), base + ".WAV"))
+    # 去重保持顺序
+    seen = set()
+    uniq = []
+    for c in candidates:
+        c2 = os.path.normpath(c)
+        if c2 not in seen:
+            seen.add(c2)
+            uniq.append(c2)
+    for c in uniq:
+        try:
+            if os.path.exists(c):
+                return c
+        except Exception:
+            continue
+    return None
 
 
 class Session:
@@ -280,15 +327,24 @@ async def ws_handler(websocket: WebSocket):
                 async def _pipeline():
                     try:
                         out_queue: asyncio.Queue = asyncio.Queue()
+                        segment_count = 0
+                        finished_count = 0
+                        early_action_name: Optional[str] = None
+                        early_action_task: Optional[asyncio.Task] = None
+                        early_started: bool = False
+                        early_checked: bool = False
 
                         async def producer():
+                            nonlocal early_started, early_action_name, early_action_task
                             try:
+                                # 生成文本并分段；期间会发送多条 segment_text
                                 await _generate_text_and_segment(session, text, out_queue)
                             finally:
                                 # 结束信号
                                 await out_queue.put(None)  # type: ignore
 
                         async def consumer():
+                            nonlocal segment_count, finished_count, early_started, early_action_name, early_action_task, early_checked
                             while not session.cancel_event.is_set():
                                 seg = await out_queue.get()
                                 if seg is None:
@@ -302,6 +358,99 @@ async def ws_handler(websocket: WebSocket):
                                     # 兼容旧格式
                                     seg_idx = 0
                                     seg_text = str(seg)
+                                # 在第一段到来时判定并启动预制音频（与 TTS 并行），避免空播与提前判定延迟
+                                if not early_checked:
+                                    early_checked = True
+                                    try:
+                                        pre_name2 = rag_ollama.predict_action_via_llm_quick(text)
+                                        if pre_name2:
+                                            cfg2 = getattr(rag_ollama, "ACTION_REGISTRY", {}).get(pre_name2)
+                                            kind2 = (cfg2.get("kind") or "").lower() if isinstance(cfg2, dict) else ""
+                                            if isinstance(cfg2, dict) and kind2 == "audio":
+            
+                                                early_action_name = pre_name2
+                                                async def _early_play2():
+                                                    # 延迟 500ms 再发送预制音频，错峰与 TTS 首包
+                                                    try:
+                                                        await asyncio.sleep(0.5)
+                                                        print(f"[ws][early_action_delay_done] rid={session.request_id} action={pre_name2}")
+                                                    except Exception:
+                                                        pass
+                                                    media = cfg2.get("media") or {}
+                                                    raw_path = media.get("path") or ""
+                                                    path = _resolve_media_path(raw_path) or raw_path
+                                                    await _send_json(websocket, {
+                                                        "type": "action_audio_start",
+                                                        "action": pre_name2,
+                                                        "id": media.get("id"),
+                                                        "format": "pcm",
+                                                        "sample_rate": 32000,
+                                                        "channels": 1,
+                                                        "width_bytes": 2,
+                                                    })
+                                                    try:
+                                                        if not path or (not os.path.exists(path)):
+                                                            raise FileNotFoundError(path or "<empty>")
+                                                        seq = 0
+                                                        with wave.open(path, "rb") as wf:
+                                                            src_channels = wf.getnchannels()
+                                                            src_rate = wf.getframerate()
+                                                            src_width = wf.getsampwidth()
+                                                            if src_width != 2:
+                                                                raise RuntimeError("only 16-bit WAV supported")
+                                                            import audioop
+                                                            chunk_size = 4096
+                                                            while not session.cancel_event.is_set():
+                                                                data = wf.readframes(chunk_size // (src_channels * src_width) if src_channels and src_width else chunk_size)
+                                                                if not data:
+                                                                    break
+                                                                mono = data if src_channels == 1 else audioop.tomono(data, 2, 0.5, 0.5)
+                                                                pcm = mono if src_rate == 32000 else audioop.ratecv(mono, 2, 1, src_rate, 32000, None)[0]
+                                                                if pcm:
+                                                                    await _send_binary(websocket, pcm)
+                                                                    await _send_json(websocket, {"type": "action_audio_chunk", "seq": seq, "size": len(pcm)})
+                                                                    seq += 1
+                                                    except Exception as e:
+                                                        await _send_json(websocket, {"type": "action_error", "reason": "asset_not_found", "action": pre_name2, "message": str(e)})
+                                                    finally:
+                                                        await _send_json(websocket, {"type": "action_audio_end", "action": pre_name2})
+                                                early_action_task = asyncio.create_task(_early_play2())
+                                                early_started = True
+                                                try:
+                                                    print(f"[ws][early_action_start_fallback] rid={session.request_id} action={pre_name2}")
+                                                except Exception:
+                                                    pass
+                                            elif isinstance(cfg2, dict) and kind2 == "image":
+                                                # 图片类动作：在首段到来时直接返回图片 URL（同样延迟 500ms 以避免与 TTS 首包抢占）
+                                                try:
+                                                    await asyncio.sleep(0.5)
+                                                except Exception:
+                                                    pass
+                                                media2 = cfg2.get("media") or {}
+                                                raw_path2 = media2.get("path") or ""
+                                                path2 = _resolve_media_path(raw_path2) or raw_path2
+                                                url2 = None
+                                                try:
+                                                    if path2 and os.path.exists(path2):
+                                                        norm_path2 = path2.replace("\\", "/")
+                                                        if "/assets/" in norm_path2:
+                                                            url2 = norm_path2[norm_path2.find("/assets/"):]
+                                                        elif "/images/" in norm_path2:
+                                                            url2 = "/assets/images/" + norm_path2.split("/images/")[-1]
+                                                except Exception:
+                                                    url2 = None
+                                                await _send_json(websocket, {
+                                                    "type": "action_image",
+                                                    "action": pre_name2,
+                                                    "url": url2 or path2 or ""
+                                                })
+                                                early_started = True
+                                                try:
+                                                    print(f"[ws][early_image_sent] rid={session.request_id} action={pre_name2} url={url2 or path2}")
+                                                except Exception:
+                                                    pass
+                                    except Exception:
+                                        pass
                                 # 标记当前分段开始
                                 await _send_json(websocket, {
                                     "type": "tts_start",
@@ -309,6 +458,11 @@ async def ws_handler(websocket: WebSocket):
                                     "index": seg_idx,
                                     "text": seg_text,
                                 })
+                                try:
+                                    print(f"[ws][tts_segment_start] rid={session.request_id} idx={seg_idx} early_started={early_started}")
+                                except Exception:
+                                    pass
+                                segment_count += 1
                                 await _stream_tts(session, seg_text, meta={"index": seg_idx})
                                 # 标记当前分段完成
                                 await _send_json(websocket, {
@@ -316,6 +470,13 @@ async def ws_handler(websocket: WebSocket):
                                     "request_id": session.request_id,
                                     "index": seg_idx,
                                 })
+                                finished_count += 1
+
+                            # 后置兜动作：禁用，仅保留前置并行动作
+                            try:
+                                print(f"[ws][post_action_disabled] rid={session.request_id}")
+                            except Exception:
+                                pass
 
                         await asyncio.gather(producer(), consumer())
                     except Exception as e:
