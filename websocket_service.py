@@ -14,6 +14,12 @@ import io
 import rag_ollama
 import tts_service
 
+# 服务配置
+SERVICE_HOST = os.environ.get("SERVICE_HOST", "127.0.0.1")
+SERVICE_PORT = os.environ.get("SERVICE_PORT", "9000")
+SERVICE_SCHEME = os.environ.get("SERVICE_SCHEME", "http")
+BASE_URL = f"{SERVICE_SCHEME}://{SERVICE_HOST}:{SERVICE_PORT}"
+
 
 app = FastAPI(title="RAG + TTS WebSocket Service")
 # 挂载本地静态目录：/assets → ./assets （其中包含 audio/ 与 images/）
@@ -434,9 +440,14 @@ async def ws_handler(websocket: WebSocket):
                                                     if path2 and os.path.exists(path2):
                                                         norm_path2 = path2.replace("\\", "/")
                                                         if "/assets/" in norm_path2:
-                                                            url2 = norm_path2[norm_path2.find("/assets/"):]
+                                                            # 提取相对路径
+                                                            relative_path = norm_path2[norm_path2.find("/assets/"):]
+                                                            # 构建完整URL
+                                                            url2 = f"{BASE_URL}{relative_path}"
                                                         elif "/images/" in norm_path2:
-                                                            url2 = "/assets/images/" + norm_path2.split("/images/")[-1]
+                                                            # 提取文件名并构建完整URL
+                                                            filename = norm_path2.split("/images/")[-1]
+                                                            url2 = f"{BASE_URL}/assets/images/{filename}"
                                                 except Exception:
                                                     url2 = None
                                                 await _send_json(websocket, {
@@ -543,4 +554,26 @@ async def _startup_ollama_warmup():
         print(f"WebSocket 服务初始化失败: {e}")
         # 忽略预热失败，后续请求仍会按需尝试
 
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    print("=" * 60)
+    print("WebSocket + 静态文件服务启动")
+    print("=" * 60)
+    print("服务地址:")
+    print(f"  WebSocket: ws://{SERVICE_HOST}:{SERVICE_PORT}/ws")
+    print(f"  静态文件: {BASE_URL}/assets/")
+    print(f"  图片访问: {BASE_URL}/assets/images/")
+    print(f"  音频访问: {BASE_URL}/assets/audio/")
+    print("=" * 60)
+    
+    # 启动服务
+    uvicorn.run(
+        "websocket_service:app",
+        host=SERVICE_HOST,
+        port=int(SERVICE_PORT),
+        log_level="info",
+        reload=False
+    )
 

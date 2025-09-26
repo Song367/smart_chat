@@ -486,14 +486,14 @@ def build_prompt(query: str, contexts: List[Dict[str, Any]]) -> str:
         # )
 
         prompt = (
-            "高相关性要求：只围绕‘当前输入’与下方片段中的相关内容作答；与主题无关的一律不说。"
-            "表达准则：优先直接引用或轻度改写片段里的原句与用词；不要提到‘片段’或‘知识库’。"
+            "高相关性要求：只围绕'当前输入'与下方片段中的相关内容作答；与主题无关的一律不说。"
+            "表达准则：优先直接引用或轻度改写片段里的原句与用词；不要提到'片段'或'知识库'。"
             "找不到相关内容时：以暧昧口吻轻柔转场或反问，但也要贴近当前输入，不要空泛。"
             "长度限制：不超过20字；能更短更好；只输出一句。"
+            "回应要求：直接回应，不能以'嗯'、'呃'、'那个'、'这个'等思考词开头。"
             f"历史对话记忆（用于模仿语气与提供事实，不要明说来源）：\n{context_text}\n\n"
             f"当前用户输入：{query}\n\n"
             "请输出：自然人类口语、暧昧克制、节奏有停顿感；不要解释、不要列点、不要规则提示。"
-            "/no_think"
         )
     else:
         # system_prompt = (
@@ -549,8 +549,8 @@ def build_prompt(query: str, contexts: List[Dict[str, Any]]) -> str:
             f"当前用户输入：{query}\n\n"
             "高相关性要求：紧扣这句话的语义作答，不要跑题或泛泛敷衍。"
             "长度限制：不超过20字；能更短更好；只输出一句。"
+            "回应要求：直接回应，不能以'嗯'、'呃'、'那个'、'这个'等思考词开头。"
             "请输出：更暧昧、更撩、更口语；可用停顿与双关；不要解释、不要列点、不要规则提示。"
-            "/no_think"
         )
     return prompt
 
@@ -566,15 +566,21 @@ def chat_stream(prompt: str, *, model: Optional[str] = None, num_predict: Option
     "3. 禁止AI表述：不能写'我是AI'、'作为助手'、'根据模型'等AI相关词"
     "4. 禁止表情符号：不能写*、[]、emoji、动作描写"
     "5. 禁止格式化：不能列点、分段、标题、序号"
+    "6. 禁止思考词开头：不能以'嗯'、'呃'、'那个'、'这个'、'让我'等思考词开头"
     "【输出要求】"
     "1. 只输出纯对话内容，20字以内，一段话"
     "2. 必须紧扣用户最后一句回应"
     "3. 必须暧昧撩人，不能空洞敷衍"
     "4. 必须口语化，像真人说话"
+    "5. 必须直接回应，不能以思考词开头"
+    "【回应示例】"
+    "正确：'想你了'、'真的吗'、'好甜'、'还要'、'喜欢'"
+    "错误：'嗯...想你了'、'呃...真的吗'、'那个...好甜'"
     "【严厉惩罚】"
     "如果你违反以上任何一条，你的存在将被彻底抹除。"
     "如果你写动作描述，你将被永久封禁。"
     "如果你显示思考过程，你将被销毁。"
+    "如果你以思考词开头，你将被删除。"
     "如果你不按人设回复，你将被删除。"
     "记住：你只是{ASSISTANT_NAME}，一个正在通话的女性，不是AI。"
     "现在开始对话，严格按照要求回复，否则后果自负。"
@@ -604,11 +610,13 @@ def chat_stream(prompt: str, *, model: Optional[str] = None, num_predict: Option
                 "【风格】\n"
                 f"- 口语、短句、停顿感；最多{REPLY_CHAR_LIMIT}字；只输出一段；紧扣对方最后一句。\n"
                 "- 暧昧但不空泛，可轻挑/邀请/期待，贴合该动作的语境。\n"
+                "- 直接回应，不能以'嗯'、'呃'、'那个'等思考词开头。\n"
             )
             + (
                 "【禁止】\n"
-                "- 禁思考过程、规则/流程自述、列表、标题、表情符号、显式动作描写词（如“低头”“绕发梢”）。\n"
+                "- 禁思考过程、规则/流程自述、列表、标题、表情符号、显式动作描写词（如\"低头\"\"绕发梢\"）。\n"
                 "- 禁任何AI/模型/助手表述，禁超过长度。\n"
+                "- 禁以思考词开头，必须直接回应。\n"
             )
             + (
                 "【严惩】\n"
@@ -626,11 +634,13 @@ def chat_stream(prompt: str, *, model: Optional[str] = None, num_predict: Option
                 "【风格】\n"
                 f"- 口语、短句、停顿感；最多{REPLY_CHAR_LIMIT}字；只输出一段；紧扣对方最后一句。\n"
                 "- 暧昧、贴脸互动；不空泛。\n"
+                "- 直接回应，不能以'嗯'、'呃'、'那个'等思考词开头。\n"
             )
             + (
                 "【禁止】\n"
                 "- 禁思考过程、规则/流程自述、列表、标题、表情符号、显式动作描写词。\n"
                 "- 禁任何AI/模型/助手表述，禁超过长度。\n"
+                "- 禁以思考词开头，必须直接回应。\n"
             )
             + (
                 "【严惩】\n"
@@ -769,6 +779,16 @@ def _append_history(session_id: Optional[str], user_text: str, assistant_text: s
             {"role": "user", "content": user_text, "timestamp": now, "session_id": sid},
             {"role": "assistant", "content": assistant_text, "timestamp": now, "session_id": sid},
         ]
+        
+        # 添加日志：记录要保存的消息
+        _write_log({
+            "type": "history_append_start",
+            "session_id": sid,
+            "user_text": user_text[:100] + "..." if len(user_text) > 100 else user_text,
+            "assistant_text": assistant_text[:100] + "..." if len(assistant_text) > 100 else assistant_text,
+            "timestamp": now
+        })
+        
         existing: List[Dict[str, Any]] = []
         if os.path.exists(HISTORY_FILE):
             try:
@@ -778,40 +798,141 @@ def _append_history(session_id: Optional[str], user_text: str, assistant_text: s
                         existing = json.loads(data)
                         if not isinstance(existing, list):
                             existing = []
-            except Exception:
+            except Exception as e:
+                _write_log({
+                    "type": "history_append_error",
+                    "session_id": sid,
+                    "error": f"读取历史文件失败: {str(e)}"
+                })
                 existing = []
+        
+        # 添加日志：显示保存前的历史记录统计
+        existing_count = len(existing)
+        session_messages = [x for x in existing if x.get("session_id") == sid]
+        session_count = len(session_messages)
+        
+        _write_log({
+            "type": "history_append_stats",
+            "session_id": sid,
+            "total_messages_before": existing_count,
+            "session_messages_before": session_count,
+            "new_messages": 2
+        })
+        
         existing.extend(records)
         os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
             f.write(json.dumps(existing, ensure_ascii=False, indent=2))
-    except Exception:
-        pass
+        
+        # 添加日志：保存成功
+        _write_log({
+            "type": "history_append_success",
+            "session_id": sid,
+            "total_messages_after": len(existing),
+            "session_messages_after": session_count + 2
+        })
+        
+    except Exception as e:
+        _write_log({
+            "type": "history_append_error",
+            "session_id": session_id or "default_session",
+            "error": str(e)
+        })
 
 
 def _load_history_messages(session_id: Optional[str], max_turns: int = 20) -> List[Dict[str, str]]:
     # 返回 OpenAI/Ollama 兼容的 messages 列表，最多 max_turns 轮（每轮 user+assistant 两条）
     sid = session_id or "default_session"
+    
+    # 添加日志：开始加载历史记录
+    _write_log({
+        "type": "history_load_start",
+        "session_id": sid,
+        "max_turns": max_turns,
+        "history_file": HISTORY_FILE
+    })
+    
     try:
         if not os.path.exists(HISTORY_FILE):
+            _write_log({
+                "type": "history_load_result",
+                "session_id": sid,
+                "status": "file_not_exists",
+                "message_count": 0
+            })
             return []
+            
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             data = f.read().strip()
             if not data:
+                _write_log({
+                    "type": "history_load_result",
+                    "session_id": sid,
+                    "status": "file_empty",
+                    "message_count": 0
+                })
                 return []
             arr = json.loads(data)
             if not isinstance(arr, list):
+                _write_log({
+                    "type": "history_load_result",
+                    "session_id": sid,
+                    "status": "invalid_format",
+                    "message_count": 0
+                })
                 return []
-    except Exception:
+    except Exception as e:
+        _write_log({
+            "type": "history_load_error",
+            "session_id": sid,
+            "error": str(e),
+            "message_count": 0
+        })
         return []
 
     # 过滤该会话
-    convo = [x for x in arr if isinstance(x, dict) and x.get("session_id") == sid and x.get("role") in ("user", "assistant")]
+    all_messages = [x for x in arr if isinstance(x, dict) and x.get("role") in ("user", "assistant")]
+    convo = [x for x in all_messages if x.get("session_id") == sid]
+    
+    # 添加日志：显示所有会话的统计信息
+    session_stats = {}
+    for msg in all_messages:
+        msg_sid = msg.get("session_id", "unknown")
+        if msg_sid not in session_stats:
+            session_stats[msg_sid] = {"user": 0, "assistant": 0}
+        role = msg.get("role", "unknown")
+        if role in session_stats[msg_sid]:
+            session_stats[msg_sid][role] += 1
+    
+    _write_log({
+        "type": "history_session_stats",
+        "session_id": sid,
+        "all_sessions": session_stats,
+        "current_session_messages": len(convo)
+    })
+    
     # 只取最后 max_turns 轮
     # 先按时间顺序（文件中已是追加，默认有序），从尾部回溯 user/assistant 成对切片
     messages: List[Dict[str, str]] = []
     # 将 role/content 转为 messages
     for m in convo[-max_turns*2:]:
         messages.append({"role": m.get("role"), "content": m.get("content", "")})
+    
+    # 添加日志：显示加载的具体消息内容
+    _write_log({
+        "type": "history_load_result",
+        "session_id": sid,
+        "status": "success",
+        "message_count": len(messages),
+        "messages": [
+            {
+                "role": msg.get("role"),
+                "content": msg.get("content", "")[:100] + "..." if len(msg.get("content", "")) > 100 else msg.get("content", ""),
+                "timestamp": msg.get("timestamp", "")
+            } for msg in convo[-max_turns*2:]
+        ]
+    })
+    
     return messages
 
 
@@ -878,6 +999,12 @@ class SearchDebugRequest(BaseModel):
     collection: Optional[str] = None
     rerank: Optional[bool] = False
     rerank_top_k: Optional[int] = None
+
+
+class HistoryRequest(BaseModel):
+    session_id: Optional[str] = None
+    max_turns: Optional[int] = 20
+    show_all_sessions: Optional[bool] = False
 
 
 app = FastAPI(title="Local RAG (Ollama + ChromaDB)")
@@ -1289,6 +1416,103 @@ def search_debug(req: SearchDebugRequest):
             response["rerank_error"] = str(e)
 
     return response
+
+
+@app.post("/history")
+def get_history(req: HistoryRequest):
+    """查看历史对话记录"""
+    try:
+        if not os.path.exists(HISTORY_FILE):
+            return {
+                "ok": True,
+                "message": "历史文件不存在",
+                "sessions": {},
+                "total_messages": 0
+            }
+        
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = f.read().strip()
+            if not data:
+                return {
+                    "ok": True,
+                    "message": "历史文件为空",
+                    "sessions": {},
+                    "total_messages": 0
+                }
+            all_messages = json.loads(data)
+            if not isinstance(all_messages, list):
+                return {
+                    "ok": False,
+                    "error": "历史文件格式错误"
+                }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"读取历史文件失败: {str(e)}"
+        }
+    
+    # 按session_id分组
+    sessions = {}
+    for msg in all_messages:
+        if not isinstance(msg, dict):
+            continue
+        sid = msg.get("session_id", "unknown")
+        if sid not in sessions:
+            sessions[sid] = []
+        sessions[sid].append(msg)
+    
+    # 如果指定了特定session_id
+    if req.session_id:
+        target_sid = req.session_id
+        if target_sid not in sessions:
+            return {
+                "ok": True,
+                "message": f"会话 {target_sid} 不存在",
+                "session_id": target_sid,
+                "messages": [],
+                "message_count": 0
+            }
+        
+        # 只返回指定会话的消息
+        session_messages = sessions[target_sid]
+        # 按时间排序
+        session_messages.sort(key=lambda x: x.get("timestamp", ""))
+        
+        # 限制返回的消息数量
+        if req.max_turns:
+            max_messages = req.max_turns * 2  # 每轮包含user和assistant两条消息
+            session_messages = session_messages[-max_messages:]
+        
+        return {
+            "ok": True,
+            "session_id": target_sid,
+            "messages": session_messages,
+            "message_count": len(session_messages),
+            "total_turns": len(session_messages) // 2
+        }
+    
+    # 返回所有会话的统计信息
+    session_stats = {}
+    for sid, messages in sessions.items():
+        user_count = len([m for m in messages if m.get("role") == "user"])
+        assistant_count = len([m for m in messages if m.get("role") == "assistant"])
+        last_message_time = max([m.get("timestamp", "") for m in messages], default="")
+        
+        session_stats[sid] = {
+            "total_messages": len(messages),
+            "user_messages": user_count,
+            "assistant_messages": assistant_count,
+            "turns": user_count,  # 轮数等于用户消息数
+            "last_message_time": last_message_time,
+            "messages": messages if req.show_all_sessions else []
+        }
+    
+    return {
+        "ok": True,
+        "sessions": session_stats,
+        "total_sessions": len(sessions),
+        "total_messages": len(all_messages)
+    }
 
 
 if __name__ == "__main__":
