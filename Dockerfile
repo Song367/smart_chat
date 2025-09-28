@@ -50,7 +50,6 @@ ENV SERVICE_SCHEME=http
 ENV USE_OPENAI_CLIENT=true
 ENV HISTORY_ENABLE=true
 ENV LOG_ENABLE=true
-ENV DASHSCOPE_API_KEY=sk-9b194abd9b3e46b3a3b764ccaf172cd1
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
