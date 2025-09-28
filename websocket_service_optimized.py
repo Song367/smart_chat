@@ -16,7 +16,7 @@ import rag_ollama
 import tts_service
 
 # 服务配置
-SERVICE_HOST = os.environ.get("SERVICE_HOST", "127.0.0.1")
+SERVICE_HOST = os.environ.get("SERVICE_HOST", "0.0.0.0")
 SERVICE_PORT = os.environ.get("SERVICE_PORT", "9000")
 SERVICE_SCHEME = os.environ.get("SERVICE_SCHEME", "http")
 BASE_URL = f"{SERVICE_SCHEME}://{SERVICE_HOST}:{SERVICE_PORT}"
