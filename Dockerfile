@@ -19,9 +19,17 @@ RUN apt-get update && apt-get install -y \
     portaudio19-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# 升级pip并配置国内镜像源
+RUN pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip config set global.extra-index-url https://pypi.org/simple && \
+    pip config set global.timeout 300 && \
+    pip config set global.retries 5
+
+
 # 复制requirements.txt并安装Python依赖
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
 
 # 复制项目文件
 COPY . .
