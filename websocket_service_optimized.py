@@ -19,7 +19,8 @@ import tts_service
 SERVICE_HOST = os.environ.get("SERVICE_HOST", "0.0.0.0")
 SERVICE_PORT = os.environ.get("SERVICE_PORT", "9000")
 SERVICE_SCHEME = os.environ.get("SERVICE_SCHEME", "http")
-BASE_URL = f"{SERVICE_SCHEME}://{SERVICE_HOST}:{SERVICE_PORT}"
+# 允许通过环境变量 BASE_URL 直接指定完整基址；未提供时退回拼接方案
+BASE_URL = os.environ.get("BASE_URL") or f"{SERVICE_SCHEME}://{SERVICE_HOST}:{SERVICE_PORT}"
 
 
 # 性能监控类
